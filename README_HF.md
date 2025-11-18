@@ -46,6 +46,11 @@ print(result)
 
 For batch runs, use `infer_vi.py` or the Gradio demo provided in this repository.
 
+### Automatic download
+
+If `checkpoints/config.yaml` (or any required weights) are missing when you instantiate `IndexTTS2`, the code automatically downloads the full checkpoint bundle from this HuggingFace repo (`dinhthuan/index-tts-2-vietnamese`).  
+Set `INDEXTTS_HF_REPO=<user/repo>` to pull from a different repository, or `INDEXTTS_DISABLE_AUTO_DOWNLOAD=1` to skip the download (e.g., on air-gapped machines).
+
 ## Data Preparation Recap
 
 1. Convert your metadata CSV to a JSONL manifest: `tools/metadata_to_manifest.py`

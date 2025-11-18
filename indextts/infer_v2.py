@@ -34,7 +34,7 @@ from indextts.s2mel.modules.audio import mel_spectrogram
 
 from transformers import AutoTokenizer
 from modelscope import AutoModelForCausalLM
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 import safetensors
 from transformers import SeamlessM4TFeatureExtractor
 import random
@@ -44,6 +44,44 @@ try:
     from vi_cleaner.vi_cleaner import ViCleaner
 except ImportError:  # pragma: no cover
     ViCleaner = None
+
+DEFAULT_HF_REPO = "dinhthuan/index-tts-2-vietnamese"
+
+
+def _ensure_model_assets(cfg_path: str, model_dir: str) -> None:
+    """
+    Ensure local model assets exist; download from HuggingFace if missing.
+
+    Controlled via environment variables:
+      - INDEXTTS_DISABLE_AUTO_DOWNLOAD=1 to skip the automatic download.
+      - INDEXTTS_HF_REPO to point to a different repo (defaults to dinhthuan/index-tts-2-vietnamese).
+    """
+    cfg_file = Path(cfg_path)
+    if cfg_file.exists():
+        return
+    if os.environ.get("INDEXTTS_DISABLE_AUTO_DOWNLOAD") == "1":
+        raise FileNotFoundError(
+            f"{cfg_path} not found and auto-download disabled (set INDEXTTS_DISABLE_AUTO_DOWNLOAD=0 to enable)."
+        )
+    repo_id = os.environ.get("INDEXTTS_HF_REPO", DEFAULT_HF_REPO)
+    if not repo_id:
+        raise FileNotFoundError(
+            f"{cfg_path} not found and INDEXTTS_HF_REPO is empty; cannot download checkpoints automatically."
+        )
+    download_dir = Path(model_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    print(f">> {cfg_path} missing. Downloading checkpoints from HuggingFace repo '{repo_id}'...")
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=str(download_dir),
+        local_dir_use_symlinks=False,
+        resume_download=True,
+    )
+    if not cfg_file.exists():
+        raise FileNotFoundError(
+            f"Expected config {cfg_path} after downloading '{repo_id}', but it was not found."
+        )
+
 
 class IndexTTS2:
     SENTENCE_ENDINGS = set(".!?！？。")
@@ -86,6 +124,7 @@ class IndexTTS2:
             self.use_cuda_kernel = False
             print(">> Be patient, it may take a while to run in CPU mode.")
 
+        _ensure_model_assets(cfg_path, model_dir)
         self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
         self.dtype = torch.float16 if self.use_fp16 else None

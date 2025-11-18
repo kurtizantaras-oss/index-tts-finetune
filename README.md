@@ -47,6 +47,10 @@ git lfs install
 git lfs pull
 ```
 
+> **Automatic weights download:** If `checkpoints/config.yaml` (or other weights) are missing at inference time, the code automatically downloads them from [huggingface.co/dinhthuan/index-tts-2-vietnamese](https://huggingface.co/dinhthuan/index-tts-2-vietnamese).  
+> - Override the source repo with `INDEXTTS_HF_REPO=<user/repo>`.  
+> - Disable the behaviour by setting `INDEXTTS_DISABLE_AUTO_DOWNLOAD=1` (useful for offline environments).
+
 3. **Create a Python environment** (choose one)
 
 ```bash
@@ -184,7 +188,7 @@ python tools/prune_gpt_checkpoint.py --checkpoint runs/vi/finetune_ckpts/last.pt
 
 ```bash
 python predict.py \
-  --prompt D:/dataset/minimax/voiceclone/.../speaker.wav \
+  --prompt ref_audio.wav \
   --text "Xin chào bạn nhé. Hôm nay trời đẹp quá!"
 ```
 
