@@ -100,13 +100,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speaker-column",
         type=str,
-        default=None,
+        default='speaker',
         help="Column name/index for speaker IDs (optional).",
     )
     parser.add_argument(
         "--language-column",
         type=str,
-        default=None,
+        default='language',
         help="Column name/index for per-utterance language code (optional).",
     )
     parser.add_argument(
