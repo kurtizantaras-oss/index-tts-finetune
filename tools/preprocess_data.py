@@ -359,30 +359,33 @@ def process_batch(
 
     candidates: List[Dict[str, Any]] = []
     for sample in samples:
-        #print(sample)
-        audio_field = sample.get("audio", "")
-        audio_path = resolve_audio_path(audio_field, audio_roots)
-        if audio_path is None:
-            skipped += 1
-            continue
-        audio_reference = format_audio_reference(audio_field, audio_path, audio_roots)
+        try:
+            audio_field = sample.get("audio", "")
+            audio_path = resolve_audio_path(audio_field, audio_roots)
+            if audio_path is None:
+                skipped += 1
+                continue
+            audio_reference = format_audio_reference(audio_field, audio_path, audio_roots)
 
-        text = clean_text(sample.get("text", ""))
-        text_tokens = tokenizer.tokenize(text)
-        if not text_tokens:
-            skipped += 1
-            continue
-        text_ids = np.asarray(tokenizer.convert_tokens_to_ids(text_tokens), dtype=np.int32)
+            text = clean_text(sample.get("text", ""))
+            text_tokens = tokenizer.tokenize(text)
+            if not text_tokens:
+                skipped += 1
+                continue
+            text_ids = np.asarray(tokenizer.convert_tokens_to_ids(text_tokens), dtype=np.int32)
 
-        candidates.append(
-            {
-                "sample": sample,
-                "audio_reference": audio_reference,
-                "text": text,
-                "text_ids": text_ids,
-                "audio_path": audio_path,
-            }
-        )
+            candidates.append(
+                {
+                    "sample": sample,
+                    "audio_reference": audio_reference,
+                    "text": text,
+                    "text_ids": text_ids,
+                    "audio_path": audio_path,
+                }
+            )
+        except:
+            print(sample)
+            skipped += 1
 
     if not candidates:
         return [], skipped
