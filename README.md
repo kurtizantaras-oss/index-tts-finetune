@@ -92,11 +92,9 @@ There are two ways to prepare training inputs.
 
 example of file
 
-id|audio_path|text|language|speaker
+id|text|language|speaker
 
-sample_000000|sample_000000.wav|Augsti godātais Valsts prezidenta kungs! Ekselences! Godātie klātesošie! Godātie deputāti!|lv|
-
-
+sample_000000|Augsti godātais Valsts prezidenta kungs! Ekselences! Godātie klātesošie! Godātie deputāti!|lv|speaker
 
 ### 3.1 Manual step-by-step
 
