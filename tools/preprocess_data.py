@@ -200,10 +200,26 @@ SPEAKER_PATTERN = re.compile(r"^\s*(?:speaker|spk)\s*\d+\s*[:：]\s*", re.IGNORE
 
 
 def clean_text(text: str) -> str:
-    text = text.strip()
+    #text = text.strip()
+    text = text.replace("％", "%")
+    text = re.sub(r'(\d+),(\d+)', r'\1.\2 ', text) # replace comma to dot  in digitals 
+    text = re.sub(r"\s+\.", ". ", text) # Arrows
+    text = re.sub(r"\s+\,", ", ", text) # Arrows
+    text = re.sub(r"(\d+)%", r"\1 % ", text) # 235% = 235 %
+    text = re.sub(r"(\d+)\.\s*([afāgbģhicčdeēījknķlļmņoprsžštuūvz:,;-])", r"\1. \2", text) # Turns 25.decembrī  into 25. decembrī to prevent splitting
+    text = re.sub(r"[.…。]", ".", text)
+    text = re.sub(r"\s+\.", ". ", text) # Arrows
+    text = re.sub(r"\s+\,", ", ", text) # Arrows
+    text = re.sub(r" -", " - ", text) #  -\w =  - 
+    text = re.sub(r"- ", " - ", text) 
+    for simbol in ['“', '”', '”', '„', '«', '»' ]:
+        text = text.replace(simbol, '"')
+    for simbol in ['_']:
+        text = text.replace(simbol, ' ')
     text = text.replace("\u3000", " ")
     text = text.replace("\xa0", " ")
     text = SPEAKER_PATTERN.sub("", text)
+    text = re.sub(r"\s+", " ", text) # replace doble spaces
     return text.strip()
 
 
@@ -343,6 +359,7 @@ def process_batch(
 
     candidates: List[Dict[str, Any]] = []
     for sample in samples:
+        #print(sample)
         audio_field = sample.get("audio", "")
         audio_path = resolve_audio_path(audio_field, audio_roots)
         if audio_path is None:
@@ -459,6 +476,7 @@ LANGUAGE_HINT_OVERRIDES: Dict[str, Optional[str]] = {
     "cn": "zh",
     "ja": "ja",
     "jp": "ja",
+    'lv': 'lv',
 }
 
 
