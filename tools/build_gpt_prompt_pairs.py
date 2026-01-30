@@ -165,6 +165,7 @@ def build_pairs(
                     "prompt_condition_len": int(prompt.record.get("condition_len", 0)),
                     "prompt_emo_vec_path": prompt.record.get("emo_vec_path", ""),
                     "prompt_duration": prompt.record.get("duration"),
+                    "language": prompt.record.get("language"),
                     "target_id": target.id,
                     "target_audio_path": target.record.get("audio_path", ""),
                     "target_text": target.record.get("text", ""),
@@ -173,6 +174,7 @@ def build_pairs(
                     "target_codes_path": target.record["codes_path"],
                     "target_code_len": target.code_len,
                     "target_emo_vec_path": target.record.get("emo_vec_path", ""),
+
                 }
                 output.append(pair_record)
                 if max_pairs and len(output) >= max_pairs:
