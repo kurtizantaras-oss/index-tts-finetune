@@ -90,6 +90,9 @@ We expect a metadata CSV with at least the following columns:
 
 There are two ways to prepare training inputs.
 
+example of file
+id|text
+sample_000000|Augsti godātais Valsts prezidenta kungs! Ekselences! Godātie klātesošie! Godātie deputāti!
 ### 3.1 Manual step-by-step
 
 1. **Convert metadata to manifest**
