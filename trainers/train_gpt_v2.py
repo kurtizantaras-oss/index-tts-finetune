@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+import gc
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -144,7 +146,7 @@ class Sample:
     manifest_path: Optional[Path] = None
 
 
-class JapaneseGPTDataset(Dataset):
+class IndexTTSGPTDataset(Dataset):
     def __init__(self, manifests: Sequence[ManifestSpec]):
         if isinstance(manifests, ManifestSpec):
             manifests = [manifests]
@@ -603,6 +605,10 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    torch.backends.cuda.matmul.allow_tf32 = False # Для V100 это не нужно
+    torch.backends.cudnn.benchmark = True # Включает автоподбор самых быстрых ядер CUDA
+ 
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -623,9 +629,9 @@ def main() -> None:
     val_specs = parse_manifest_specs(args.val_manifests, "--val-manifest")
 
     print("[Info] Loading training manifests...")
-    train_dataset = JapaneseGPTDataset(train_specs)
+    train_dataset = IndexTTSGPTDataset(train_specs)
     print("[Info] Loading validation manifests...")
-    val_dataset = JapaneseGPTDataset(val_specs)
+    val_dataset = IndexTTSGPTDataset(val_specs)
 
     manifest_metadata = {
         "train": [
@@ -677,7 +683,7 @@ def main() -> None:
         num_training_steps=total_steps,
     )
     use_amp = args.amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler('cuda', enabled=args.amp) if use_amp else None
 
     global_step = 0
     start_epoch = 0
@@ -685,6 +691,7 @@ def main() -> None:
     last_saved_step: int | None = None
 
     resume_path: str | None = None
+
     if args.resume:
         if args.resume == "auto":
             candidate = output_dir / "latest.pth"
@@ -692,19 +699,37 @@ def main() -> None:
                 resume_path = str(candidate)
         else:
             resume_path = args.resume
+
     if resume_path:
-        checkpoint = torch.load(resume_path, map_location=device)
+        # 1. Загружаем на CPU, чтобы не забивать VRAM копией данных
+        print(f"[Info] Loading checkpoint to CPU first to save VRAM...")
+        checkpoint = torch.load(resume_path, map_location="cpu") 
+        
+        # 2. Переносим веса в модель (PyTorch сам отправит их на GPU, так как модель уже там)
         model.load_state_dict(checkpoint["model"])
+        
+        # 3. Загружаем состояние оптимизатора
         optimizer.load_state_dict(checkpoint["optimizer"])
+        
         if checkpoint.get("scheduler"):
             scheduler.load_state_dict(checkpoint["scheduler"])
+            
         if scaler and checkpoint.get("scaler"):
             scaler.load_state_dict(checkpoint["scaler"])
+            
         start_epoch = checkpoint.get("epoch", 0)
         global_step = checkpoint.get("step", 0)
         recent_checkpoints = checkpoint.get("recent_checkpoints", [])
         last_saved_step = checkpoint.get("step")
+        
         print(f"[Info] Resumed from {resume_path} at epoch {start_epoch}, step {global_step}.")
+        
+        # 4. КРИТИЧНО: Удаляем огромный словарь checkpoint из памяти
+        del checkpoint
+        
+        # 5. Чистим мусор в Python и кеш в CUDA
+        gc.collect()
+        torch.cuda.empty_cache()
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -718,8 +743,9 @@ def main() -> None:
         print("[Info] Skipping startup validation; will evaluate after next training interval.")
 
     for epoch in range(start_epoch, args.epochs):
-        for batch_idx, batch in enumerate(train_loader):
-            with torch.cuda.amp.autocast(enabled=use_amp):
+        pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch}")
+        for batch_idx, batch in pbar:
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 text_loss, mel_loss, metrics = compute_losses(
                     model,
                     batch,
@@ -753,11 +779,14 @@ def main() -> None:
                     writer.add_scalar("train/mel_loss", mel_loss.item(), global_step)
                     writer.add_scalar("train/mel_top1", metrics["mel_top1"], global_step)
                     writer.add_scalar("train/lr", scheduler.get_last_lr()[0], global_step)
-                    print(
-                        f"[Train] epoch={epoch + 1} step={global_step} "
-                        f"text_loss={text_loss.item():.4f} mel_loss={mel_loss.item():.4f} "
-                        f"mel_top1={metrics['mel_top1']:.4f} lr={scheduler.get_last_lr()[0]:.2e}"
-                    )
+                    # Вместо print используем обновление pbar
+                    pbar.set_postfix({
+                        "step": global_step,
+                        "t_loss": f"{text_loss.item():.3f}",
+                        "m_loss": f"{mel_loss.item():.3f}",
+                        "top1": f"{metrics['mel_top1']:.3f}",
+                        "lr": f"{scheduler.get_last_lr()[0]:.1e}"
+                    })
 
                 if args.val_interval > 0 and global_step > 0 and global_step % args.val_interval == 0:
                     val_metrics = evaluate(
