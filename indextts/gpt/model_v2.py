@@ -307,7 +307,7 @@ class UnifiedVoice(nn.Module):
                  mel_length_compression=1024, number_text_tokens=256,
                  start_text_token=0, stop_text_token=1, number_mel_codes=8194, start_mel_token=8192, stop_mel_token=8193,
                  train_solo_embeddings=False, use_mel_codes_as_input=True,
-                 checkpointing=True, types=1,
+                 checkpointing=True, types=1, num_languages=1,
                  condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None, use_accel=False):
         """
         Args:
@@ -328,9 +328,11 @@ class UnifiedVoice(nn.Module):
             use_mel_codes_as_input:
             checkpointing:
             condition_type: perceiver, gst or default encoder
+            num_languages: Number of languages supported for language embedding
         """
         super().__init__()
         self.number_text_tokens = number_text_tokens
+        self.num_languages = num_languages
         self.start_text_token = start_text_token
         self.stop_text_token = stop_text_token
         self.number_mel_codes = number_mel_codes
@@ -379,6 +381,10 @@ class UnifiedVoice(nn.Module):
 
 
         self.text_embedding = nn.Embedding(self.number_text_tokens * types + 1, model_dim)
+        self.lang_embedding = nn.Embedding(num_languages, model_dim) if num_languages > 1 else None
+        # Initialize language embedding weights if it exists
+        if self.lang_embedding is not None:
+            self.lang_embedding.weight.data.normal_(mean=0.0, std=.02)
         self.emo_layer = nn.Linear(model_dim, model_dim)
         self.emovec_layer = nn.Linear(1024, model_dim)
 
@@ -596,7 +602,7 @@ class UnifiedVoice(nn.Module):
 
 
     def forward(self, speech_conditioning_latent, text_inputs, text_lengths, mel_codes, mel_codes_lengths, emo_speech_conditioning_latent,
-                cond_mel_lengths=None, emo_cond_mel_lengths=None, emo_vec=None, use_speed=None, do_spk_cond=False):
+                cond_mel_lengths=None, emo_cond_mel_lengths=None, emo_vec=None, use_speed=None, do_spk_cond=False, lang_ids=None):
         """
         Forward pass that uses both text and voice in either text conditioning mode or voice conditioning mode
 
@@ -605,6 +611,7 @@ class UnifiedVoice(nn.Module):
         text_lengths: long tensor, (b,)
         mel_inputs:  long tensor, (b,m)
         wav_lengths: long tensor, (b,)
+        lang_ids: long tensor, (b,) language ids for language embedding
 
         If return_attentions is specified, only logits are returned.
         If return_latent is specified, loss & logits are not computed or returned. Only the predicted latents are returned.
@@ -630,9 +637,13 @@ class UnifiedVoice(nn.Module):
         duration_emb_half = self.speed_emb(torch.ones_like(use_speed))
         conds = torch.cat((speech_conditioning_latent + emo_vec.unsqueeze(1), duration_emb_half.unsqueeze(1), duration_emb.unsqueeze(1)), 1)
         text_inputs, text_targets = self.build_aligned_inputs_and_targets(text_inputs, self.start_text_token, self.stop_text_token)
+        
+        # Apply language embedding if available and lang_ids provided
         text_emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
-        mel_codes, mel_targets = self.build_aligned_inputs_and_targets(mel_codes, self.start_mel_token, self.stop_mel_token)
-
+        if self.lang_embedding is not None and lang_ids is not None:
+            lang_emb = self.lang_embedding(lang_ids)
+            text_emb = text_emb + lang_emb.unsqueeze(1)
+        
         mel_emb = self.mel_embedding(mel_codes)
         mel_emb = mel_emb + self.mel_pos_embedding(mel_codes)
 
@@ -643,6 +654,7 @@ class UnifiedVoice(nn.Module):
         self,
         conditional_latents: torch.Tensor,
         text_inputs: torch.Tensor,
+        lang_ids: torch.Tensor = None,
     ):
         
         """
@@ -650,6 +662,7 @@ class UnifiedVoice(nn.Module):
         Args:
             conds_latent: (b, 32, dim) audio conditioning embedding by `get_conditioning()`
             text_inputs: (b, L)
+            lang_ids: (b,) language ids for language embedding
         Returns:
             input_ids: (b, s+1) the input ids for the GPT2InferenceModel.generate()
             inputs_embeds: (b, s+1, dim) the input embeddings for the GPT2InferenceModel.forward()
@@ -670,6 +683,13 @@ class UnifiedVoice(nn.Module):
             text_input = F.pad(text_input, (0, 1), value=self.stop_text_token)
             text_input_pos = torch.arange(0, text_input.size(-1), device=device)
             text_emb = self.text_embedding(text_input) + self.text_pos_embedding.emb(text_input_pos)
+            
+            # Apply language embedding if available and lang_ids provided
+            if self.lang_embedding is not None and lang_ids is not None:
+                lang_id = lang_ids[i] if lang_ids.ndim == 1 else lang_ids
+                lang_emb = self.lang_embedding(lang_id)
+                text_emb = text_emb + lang_emb
+            
             # concatenate [conditional latents][text embeddings]
             conds_text_emb = [
                 conditional_latents.squeeze(0) if single_cond else conditional_latents[i],
@@ -719,6 +739,7 @@ class UnifiedVoice(nn.Module):
         typical_sampling=False,
         typical_mass=.9,
         target_duration_tokens: Optional[int] = None,
+        lang_ids=None,
         **hf_generate_kwargs,
     ):
         """
@@ -728,6 +749,7 @@ class UnifiedVoice(nn.Module):
             cond_mel_lengths: lengths of the conditioning mel spectrograms in shape (b,) or (1,)
             input_tokens: additional tokens for generation in shape (b, s) or (s,)
             max_generate_length: limit the number of generated tokens
+            lang_ids: (b,) language ids for language embedding
             hf_generate_kwargs: kwargs for `GPT2InferenceModel.generate(**hf_generate_kwargs)`
         """
 
@@ -762,7 +784,7 @@ class UnifiedVoice(nn.Module):
             (speech_conditioning_latent + emo_vec.unsqueeze(1), duration_ctrl.unsqueeze(1), duration_free.unsqueeze(1)),
             1,
         )
-        input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(conds_latent, text_inputs)
+        input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(conds_latent, text_inputs, lang_ids)
         self.inference_model.store_mel_emb(inputs_embeds)
         if input_tokens is None:
             inputs = input_ids

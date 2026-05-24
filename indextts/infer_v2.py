@@ -85,6 +85,8 @@ def _ensure_model_assets(cfg_path: str, model_dir: str) -> None:
 
 class IndexTTS2:
     SENTENCE_ENDINGS = set(".!?！？。")
+    SENTENCE_TAIL_TRIM_MS = 50  # Trim 50ms from end of each sentence segment
+    CROSSFADE_MS = 10  # Crossfade duration in milliseconds for merging segments
 
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
@@ -577,14 +579,14 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, lang_id=None, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
             print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt}, "
                   f"emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
                   f"emo_vector:{emo_vector}, use_emo_text:{use_emo_text}, "
-                  f"emo_text:{emo_text}")
+                  f"emo_text:{emo_text}, lang_id:{lang_id}")
         start_time = time.perf_counter()
 
         if use_emo_text or emo_vector is not None:
@@ -760,6 +762,11 @@ class IndexTTS2:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
                         # emovec = emovec_mat
 
+                    # Prepare lang_ids tensor for GPT inference
+                    lang_ids_tensor = None
+                    if lang_id is not None and hasattr(self.gpt, 'lang_embedding') and self.gpt.lang_embedding is not None:
+                        lang_ids_tensor = torch.tensor([lang_id], device=text_tokens.device, dtype=torch.long)
+
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
                         text_tokens,
@@ -767,6 +774,7 @@ class IndexTTS2:
                         cond_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_cond_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
+                        lang_ids=lang_ids_tensor,
                         do_sample=True,
                         top_p=top_p,
                         top_k=top_k,

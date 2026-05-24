@@ -140,6 +140,16 @@ def parse_args() -> argparse.Namespace:
         help="Language hint passed to the TextNormalizer/TextTokenizer.",
     )
     parser.add_argument(
+        "--lang-map",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated language mapping in format 'lang_code:lang_id', e.g., "
+            "'en:0,ja:1,zh:2'. Used for multilingual training with lang_embedding. "
+            "If not provided, defaults to single-language mode (lang_id=0)."
+        ),
+    )
+    parser.add_argument(
         "--device",
         default="cuda",
         help="Computation device (cuda or cpu).",
@@ -353,6 +363,8 @@ def process_batch(
     dirs: Dict[str, Path],
     audio_roots: Iterable[Path],
     executor: ThreadPoolExecutor | None,
+    lang_map: Optional[Dict[str, int]] = None,
+    default_lang: str = "en",
 ) -> Tuple[List[Dict[str, Any]], int]:
     prepared: List[Dict[str, Any]] = []
     skipped = 0
@@ -374,12 +386,16 @@ def process_batch(
                 continue
             text_ids = np.asarray(tokenizer.convert_tokens_to_ids(text_tokens), dtype=np.int32)
 
+            # Get language ID for this sample
+            lang_id = get_lang_id(sample, lang_map, default_lang) if lang_map else 0
+
             candidates.append(
                 {
                     "sample": sample,
                     "audio_reference": audio_reference,
                     "text": text,
                     "text_ids": text_ids,
+                    "lang_id": lang_id,
                     "audio_path": audio_path,
                 }
             )
@@ -424,15 +440,33 @@ def process_batch(
 
     with torch.inference_mode():
         semantic_code, _ = semantic_codec.quantize(feat)
+        
+        # Перетворюємо на 2D тензор [batch, time], якщо потрібно
         if semantic_code.dim() == 1:
             semantic_code = semantic_code.unsqueeze(0)
-        semantic_code = semantic_code.detach().cpu().numpy().astype(np.int32)
-        cond_lengths = attention_mask.sum(dim=1).long()
+        elif semantic_code.dim() > 2:
+            # Якщо семантичні коди мають додаткові виміри, стискаємо їх
+            semantic_code = semantic_code.squeeze()
+            if semantic_code.dim() == 1:
+                semantic_code = semantic_code.unsqueeze(0)
+        
+        # Критично: Обрізаємо семантичні токени по attention_mask
+        # attention_mask має форму [batch, time], де 1 = валідний токен, 0 = padding
+        cond_lengths = attention_mask.sum(dim=1).long()  # [batch]
+        
+        # Отримуємо реальні довжини для кожного елемента батчу
+        semantic_lengths = cond_lengths.cpu().numpy()
+        
+        # Трансформуємо feat для get_conditioning
         feat_t = feat.transpose(1, 2)
         cond_lengths_device = cond_lengths.to(feat.device)
+        
+        # Обчислюємо conditioning та emo_vec для всього батчу одночасно
         conditioning = gpt.get_conditioning(feat_t, cond_lengths_device)
         emo_vec = gpt.get_emovec(feat, cond_lengths_device)
 
+    # Конвертуємо в numpy один раз для всього батчу
+    semantic_code_np = semantic_code.detach().cpu().numpy().astype(np.int32)
     conditioning_np = conditioning.detach().cpu().numpy().astype(np.float32)
     emo_vec_np = emo_vec.detach().cpu().numpy().astype(np.float32)
 
@@ -446,7 +480,11 @@ def process_batch(
         emo_path = dirs["emo"] / f"{uid}.npy"
         text_path = dirs["text"] / f"{uid}.npy"
 
-        save_numpy(code_path, semantic_code[idx])
+        # Обрізаємо семантичні токени по реальній довжині (видаляємо padding)
+        sem_length = int(semantic_lengths[idx])
+        semantic_tokens_trimmed = semantic_code_np[idx][:sem_length]
+        
+        save_numpy(code_path, semantic_tokens_trimmed)
         save_numpy(cond_path, conditioning_np[idx])
         save_numpy(emo_path, emo_vec_np[idx])
         save_numpy(text_path, item["text_ids"])
@@ -457,11 +495,12 @@ def process_batch(
             "text": item["text"],
             "speaker": sample.get("speaker", ""),
             "language": sample.get("language", ""),
+            "lang_id": item["lang_id"],
             "duration": sample.get("duration"),
             "text_ids_path": text_path.relative_to(output_root).as_posix(),
             "text_len": int(item["text_ids"].size),
             "codes_path": code_path.relative_to(output_root).as_posix(),
-            "code_len": int(semantic_code[idx].size),
+            "code_len": int(semantic_tokens_trimmed.size),  # Оновлена довжина після обрізання
             "condition_path": cond_path.relative_to(output_root).as_posix(),
             "condition_len": int(conditioning_np[idx].shape[0]),
             "emo_vec_path": emo_path.relative_to(output_root).as_posix(),
@@ -481,6 +520,95 @@ LANGUAGE_HINT_OVERRIDES: Dict[str, Optional[str]] = {
     "jp": "ja",
     'lv': 'lv',
 }
+
+
+def extract_languages_from_tokenizer(tokenizer_path: Path) -> Dict[str, int]:
+    """
+    Extract language codes from SentencePiece tokenizer vocabulary.
+    Looks for tokens in format ▁[EN], ▁[JA], ▁[ZH], etc.
+    Returns a dictionary mapping language code (lowercase) to language ID.
+    """
+    from sentencepiece import SentencePieceProcessor
+    
+    if not tokenizer_path.exists():
+        print(f"Warning: Tokenizer file {tokenizer_path} does not exist.")
+        return {}
+    
+    sp_model = SentencePieceProcessor(model_file=str(tokenizer_path))
+    lang_map = {}
+    lang_id_counter = 0
+    
+    # Pattern to match language tokens like ▁[EN], ▁[JA], ▁[ZH], etc.
+    lang_pattern = re.compile(r"^▁\[([A-Za-z]{2,3})\]$")
+    
+    for i in range(sp_model.GetPieceSize()):
+        token = sp_model.IdToPiece(i)
+        match = lang_pattern.match(token)
+        if match:
+            lang_code = match.group(1).lower()
+            if lang_code not in lang_map:
+                lang_map[lang_code] = lang_id_counter
+                lang_id_counter += 1
+    
+    if lang_map:
+        print(f"Extracted {len(lang_map)} languages from tokenizer: {sorted(lang_map.keys())}")
+    
+    return lang_map
+
+
+def parse_lang_map(lang_map_str: str, tokenizer_path: Optional[Path] = None) -> Dict[str, int]:
+    """
+    Parse language mapping string like 'en:0,ja:1,zh:2' into a dictionary.
+    If lang_map_str is empty and tokenizer_path is provided, extract languages from tokenizer.
+    """
+    # If no manual mapping provided, try to extract from tokenizer
+    if not lang_map_str or not lang_map_str.strip():
+        if tokenizer_path is not None:
+            return extract_languages_from_tokenizer(tokenizer_path)
+        return {}
+    
+    result = {}
+    for item in lang_map_str.split(","):
+        item = item.strip()
+        if ":" not in item:
+            continue
+        parts = item.split(":")
+        if len(parts) != 2:
+            continue
+        lang_code = parts[0].strip()
+        try:
+            lang_id = int(parts[1].strip())
+            result[lang_code] = lang_id
+        except ValueError:
+            continue
+    return result
+
+
+def get_lang_id(sample: Dict[str, Any], lang_map: Dict[str, int], default_lang: str) -> int:
+    """Get language ID for a sample based on lang_map."""
+    if not lang_map:
+        return 0
+    
+    sample_lang = sample.get("language", "").strip()
+    if not sample_lang:
+        sample_lang = default_lang
+    
+    # Try case-insensitive lookup
+    sample_lang_lower = sample_lang.lower()
+    if sample_lang_lower in lang_map:
+        return lang_map[sample_lang_lower]
+    
+    # Also try uppercase version (e.g., "EN" -> "en")
+    if sample_lang.upper().lower() in lang_map:
+        return lang_map[sample_lang.upper().lower()]
+    
+    # Fall back to default language
+    default_lang_lower = default_lang.lower()
+    if default_lang_lower in lang_map:
+        return lang_map[default_lang_lower]
+    
+    # If nothing matches, return 0 (first language)
+    return 0
 
 
 def language_hint_from_code(code: str, default: Optional[str] = None) -> Optional[str]:
@@ -519,6 +647,7 @@ def preprocess_dataset(
     args,
     batch_size: int,
     executor: Optional[ThreadPoolExecutor],
+    lang_map: Dict[str, int],
 ) -> tuple[int, int, int, int]:
     manifest_path = manifest_path.expanduser().resolve()
     if not manifest_path.exists():
@@ -581,11 +710,14 @@ def preprocess_dataset(
                 dirs,
                 audio_roots=audio_roots,
                 executor=executor,
+                lang_map=lang_map,
+                default_lang=dataset_language,
             )
             skipped += batch_skipped
             pending = pending[limit:]
             for entry in entries:
                 is_val = assign_to_validation(entry["id"], args.val_ratio)
+                
                 if is_val:
                     if entry["id"] not in val_ids:
                         val_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -676,6 +808,15 @@ def main() -> None:
 
     gpt = build_unified_voice(cfg, args.gpt_checkpoint, device)
 
+    # Parse language mapping for multilingual training
+    # If --lang-map is not provided, automatically extract from tokenizer
+    lang_map = parse_lang_map(args.lang_map, args.tokenizer)
+    if lang_map:
+        print(f"Language mapping: {lang_map}")
+        print(f"Number of languages: {len(lang_map)}")
+    else:
+        print("Single-language mode (lang_id=0 for all samples)")
+
     summaries: List[tuple[str, int, int, int, int]] = []
     try:
         for lang, manifest, output_dir in dataset_specs:
@@ -695,6 +836,7 @@ def main() -> None:
                 args,
                 batch_size,
                 executor,
+                lang_map,
             )
             summaries.append((lang, processed, skipped, train_count, val_count))
     finally:

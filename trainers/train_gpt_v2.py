@@ -45,6 +45,74 @@ from indextts.gpt.model_v2 import UnifiedVoice
 from indextts.utils.front import TextNormalizer, TextTokenizer
 
 
+# Language mapping utilities
+LANGUAGE_TO_ID: Dict[str, int] = {}
+ID_TO_LANGUAGE: Dict[int, str] = {}
+
+
+def build_language_map(manifests: List[ManifestSpec], explicit_map: str = "", num_languages: int = 1) -> Dict[str, int]:
+    """
+    Build a mapping from language codes to integer IDs for language embeddings.
+    
+    Args:
+        manifests: List of manifest specifications
+        explicit_map: JSON string with explicit language->id mapping
+        num_languages: Total number of languages to support
+    
+    Returns:
+        Dictionary mapping language codes to integer IDs
+    """
+    global LANGUAGE_TO_ID, ID_TO_LANGUAGE
+    
+    # If explicit map provided, use it
+    if explicit_map:
+        lang_map = json.loads(explicit_map)
+        LANGUAGE_TO_ID = {k.lower(): int(v) for k, v in lang_map.items()}
+        ID_TO_LANGUAGE = {v: k for k, v in LANGUAGE_TO_ID.items()}
+        return LANGUAGE_TO_ID
+    
+    # Otherwise, auto-assign from manifests
+    all_languages: Set[str] = set()
+    for spec in manifests:
+        if spec.language:
+            all_languages.add(spec.language.lower())
+    
+    # Also scan manifest files for language info
+    for spec in manifests:
+        if spec.path.exists():
+            with spec.path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                        lang = record.get("language") or record.get("target_language") or record.get("prompt_language")
+                        if lang:
+                            all_languages.add(lang.lower())
+                    except json.JSONDecodeError:
+                        continue
+    
+    # Assign IDs sequentially
+    sorted_langs = sorted(all_languages)
+    LANGUAGE_TO_ID = {lang: idx for idx, lang in enumerate(sorted_langs)}
+    ID_TO_LANGUAGE = {idx: lang for lang, idx in LANGUAGE_TO_ID.items()}
+    
+    # Warn if we have more languages than allocated
+    if len(LANGUAGE_TO_ID) > num_languages:
+        print(f"[Warn] Found {len(LANGUAGE_TO_ID)} languages but num_languages={num_languages}. "
+              f"Consider increasing --num-languages.")
+    
+    return LANGUAGE_TO_ID
+
+
+def get_language_id(language: Optional[str], default_id: int = 0) -> int:
+    """Get language ID for a given language code."""
+    if language is None:
+        return default_id
+    lang_lower = language.lower()
+    return LANGUAGE_TO_ID.get(lang_lower, default_id)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Finetune IndexTTS2 GPT on Japanese data.")
     parser.add_argument(
@@ -94,6 +162,18 @@ def parse_args() -> argparse.Namespace:
         help="Probability of zeroing duration embeddings when --use-duration-control is enabled.",
     )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed.")
+    parser.add_argument(
+        "--num-languages",
+        type=int,
+        default=1,
+        help="Number of languages for language embedding. Set >1 to enable multilingual training.",
+    )
+    parser.add_argument(
+        "--language-map",
+        type=str,
+        default="",
+        help="JSON string mapping language codes to IDs (e.g., '{\"en\":0,\"ja\":1,\"uk\":2}'). If empty, auto-assign from manifests.",
+    )
     return parser.parse_args()
 
 
@@ -418,14 +498,22 @@ def load_tokenizer(tokenizer_path: Path) -> TextTokenizer:
     return tokenizer
 
 
-def build_model(cfg_path: Path, tokenizer: TextTokenizer, base_checkpoint: Path, device: torch.device) -> UnifiedVoice:
+def build_model(cfg_path: Path, tokenizer: TextTokenizer, base_checkpoint: Path, device: torch.device, num_languages: int = 1) -> UnifiedVoice:
     cfg = OmegaConf.load(cfg_path)
     vocab_size = tokenizer.vocab_size
     if cfg.gpt.number_text_tokens != vocab_size:
         cfg.gpt.number_text_tokens = vocab_size
+    
+    # Update number of languages in config
+    if hasattr(cfg.gpt, 'num_languages'):
+        if cfg.gpt.num_languages != num_languages:
+            print(f"[Info] Overriding config num_languages ({cfg.gpt.num_languages}) with command-line value ({num_languages})")
+            cfg.gpt.num_languages = num_languages
+    else:
+        cfg.gpt.num_languages = num_languages
 
     model = UnifiedVoice(**cfg.gpt)
-    checkpoint = torch.load(base_checkpoint, map_location="cpu")
+    checkpoint = torch.load(base_checkpoint, map_location="cpu", weights_only=False)
     raw_state_dict = checkpoint.get("model", checkpoint)
 
     filtered_state_dict = {}
@@ -479,6 +567,14 @@ def compute_losses(
     emo_vec = batch["emo_vec"].to(device)
     text_lengths = batch["text_lengths"].to(device)
     code_lengths = batch["code_lengths"].to(device)
+    
+    # Get language IDs for the batch
+    languages = batch.get("languages", [None] * text_ids.size(0))
+    lang_ids = torch.tensor(
+        [get_language_id(lang, default_id=0) for lang in languages],
+        dtype=torch.long,
+        device=device
+    )
 
     batch_size = text_ids.size(0)
     use_speed = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -509,7 +605,12 @@ def compute_losses(
         dim=1,
     )
 
+    # Apply language embedding if available
     text_emb = model.text_embedding(text_inputs) + model.text_pos_embedding(text_inputs)
+    if model.lang_embedding is not None:
+        lang_emb = model.lang_embedding(lang_ids).unsqueeze(1)  # [batch, 1, dim]
+        text_emb = text_emb + lang_emb
+    
     mel_emb = model.mel_embedding(mel_inputs) + model.mel_pos_embedding(mel_inputs)
 
     text_logits, mel_logits = model.get_logits(conds, text_emb, model.text_head, mel_emb, model.mel_head)
@@ -606,8 +707,8 @@ def main() -> None:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    torch.backends.cuda.matmul.allow_tf32 = False # Для V100 это не нужно
-    torch.backends.cudnn.benchmark = True # Включает автоподбор самых быстрых ядер CUDA
+    torch.backends.cuda.matmul.allow_tf32 = False # Для V100 це не потрібно
+    torch.backends.cudnn.benchmark = True # Включає автопідбір найшвидших ядер CUDA
  
 
     output_dir = args.output_dir.resolve()
@@ -623,10 +724,26 @@ def main() -> None:
     writer = SummaryWriter(log_dir=str(log_dir))
 
     tokenizer = load_tokenizer(args.tokenizer)
-    model = build_model(args.config, tokenizer, args.base_checkpoint, device)
-
+    
+    # Build language mapping before creating model
     train_specs = parse_manifest_specs(args.train_manifests, "--train-manifest")
     val_specs = parse_manifest_specs(args.val_manifests, "--val-manifest")
+    
+    print("[Info] Building language map...")
+    build_language_map(
+        train_specs + val_specs,
+        explicit_map=args.language_map,
+        num_languages=args.num_languages
+    )
+    print(f"[Info] Language map: {LANGUAGE_TO_ID}")
+    
+    # Save language map to output directory for reference
+    lang_map_path = output_dir / "language_map.json"
+    with lang_map_path.open("w", encoding="utf-8") as f:
+        json.dump({"language_to_id": LANGUAGE_TO_ID, "id_to_language": ID_TO_LANGUAGE}, f, ensure_ascii=False, indent=2)
+    print(f"[Info] Language map saved to {lang_map_path}")
+    
+    model = build_model(args.config, tokenizer, args.base_checkpoint, device, num_languages=args.num_languages)
 
     print("[Info] Loading training manifests...")
     train_dataset = IndexTTSGPTDataset(train_specs)
