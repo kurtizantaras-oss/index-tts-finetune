@@ -446,7 +446,14 @@ def process_batch(
         emo_path = dirs["emo"] / f"{uid}.npy"
         text_path = dirs["text"] / f"{uid}.npy"
 
-        save_numpy(code_path, semantic_code[idx])
+        # frames beyond attention_mask are quantized batch padding, not audio
+        real_len = int(cond_lengths[idx].item())
+        if semantic_code[idx].ndim == 1:
+            code_clean = semantic_code[idx][:real_len]
+        else:
+            code_clean = semantic_code[idx][..., :real_len]
+
+        save_numpy(code_path, code_clean)
         save_numpy(cond_path, conditioning_np[idx])
         save_numpy(emo_path, emo_vec_np[idx])
         save_numpy(text_path, item["text_ids"])
@@ -461,7 +468,7 @@ def process_batch(
             "text_ids_path": text_path.relative_to(output_root).as_posix(),
             "text_len": int(item["text_ids"].size),
             "codes_path": code_path.relative_to(output_root).as_posix(),
-            "code_len": int(semantic_code[idx].size),
+            "code_len": int(code_clean.shape[-1]),
             "condition_path": cond_path.relative_to(output_root).as_posix(),
             "condition_len": int(conditioning_np[idx].shape[0]),
             "emo_vec_path": emo_path.relative_to(output_root).as_posix(),
