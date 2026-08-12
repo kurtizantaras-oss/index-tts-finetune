@@ -45,6 +45,53 @@ from indextts.gpt.model_v2 import UnifiedVoice
 from indextts.utils.front import TextNormalizer, TextTokenizer
 
 
+# Default language to ID mapping for multilingual training
+DEFAULT_LANGUAGE_MAP = {
+    "en": 0,
+    "ja": 1,
+    "zh": 2,
+    "ko": 3,
+    "de": 4,
+    "fr": 5,
+    "es": 6,
+    "it": 7,
+    "pt": 8,
+    "ru": 9,
+}
+
+
+def load_language_map(language_map_arg: Optional[str]) -> Dict[str, int]:
+    """Load language map from argument (JSON string or file path)."""
+    if language_map_arg is None:
+        return DEFAULT_LANGUAGE_MAP
+    
+    # Try to parse as JSON string first
+    try:
+        lang_map = json.loads(language_map_arg)
+        if isinstance(lang_map, dict):
+            return {k.lower(): v for k, v in lang_map.items()}
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to load from file
+    lang_map_path = Path(language_map_arg)
+    if lang_map_path.exists():
+        with open(lang_map_path, 'r', encoding='utf-8') as f:
+            lang_map = json.load(f)
+            return {k.lower(): v for k, v in lang_map.items()}
+    
+    print(f"[Warn] Could not load language map from '{language_map_arg}', using default.")
+    return DEFAULT_LANGUAGE_MAP
+
+
+def language_to_id(language: Optional[str], language_map: Dict[str, int], default_id: int = 0) -> int:
+    """Convert language name to ID."""
+    if language is None:
+        return default_id
+    lang_lower = language.lower().strip()
+    return language_map.get(lang_lower, default_id)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Finetune IndexTTS2 GPT on Japanese data.")
     parser.add_argument(
@@ -94,6 +141,18 @@ def parse_args() -> argparse.Namespace:
         help="Probability of zeroing duration embeddings when --use-duration-control is enabled.",
     )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed.")
+    parser.add_argument(
+        "--num-languages",
+        type=int,
+        default=1,
+        help="Number of supported languages for language embedding (must match model config).",
+    )
+    parser.add_argument(
+        "--language-map",
+        type=str,
+        default=None,
+        help="JSON string or path to JSON file mapping language names to IDs (e.g., '{\"en\":0,\"ja\":1}').",
+    )
     return parser.parse_args()
 
 
@@ -373,7 +432,7 @@ class IndexTTSGPTDataset(Dataset):
         raise RuntimeError("Exceeded retry budget while sampling training data.")
 
 
-def collate_batch(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def collate_batch(batch: List[Dict[str, torch.Tensor]], language_map: Optional[Dict[str, int]] = None) -> Dict[str, torch.Tensor]:
     text_tensors = [item["text_ids"] for item in batch]
     code_tensors = [item["codes"] for item in batch]
     condition_tensors = [item["condition"] for item in batch]
@@ -394,6 +453,20 @@ def collate_batch(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tenso
     languages = [item.get("language") for item in batch]
     prompt_languages = [item.get("prompt_language") for item in batch]
     manifest_paths = [item.get("manifest_path") for item in batch]
+    
+    # Convert language names to IDs if language_map is provided
+    if language_map is not None:
+        language_ids = torch.tensor(
+            [language_to_id(lang, language_map, default_id=0) for lang in languages],
+            dtype=torch.long
+        )
+        prompt_language_ids = torch.tensor(
+            [language_to_id(lang, language_map, default_id=0) for lang in prompt_languages],
+            dtype=torch.long
+        )
+    else:
+        language_ids = None
+        prompt_language_ids = None
 
     return {
         "ids": ids,
@@ -409,6 +482,8 @@ def collate_batch(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tenso
         "languages": languages,
         "prompt_languages": prompt_languages,
         "manifest_paths": manifest_paths,
+        "language_ids": language_ids,
+        "prompt_language_ids": prompt_language_ids,
     }
 
 
@@ -479,6 +554,11 @@ def compute_losses(
     emo_vec = batch["emo_vec"].to(device)
     text_lengths = batch["text_lengths"].to(device)
     code_lengths = batch["code_lengths"].to(device)
+    
+    # Get language IDs if available
+    language_ids = batch.get("language_ids")
+    if language_ids is not None:
+        language_ids = language_ids.to(device)
 
     batch_size = text_ids.size(0)
     use_speed = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -510,6 +590,13 @@ def compute_losses(
     )
 
     text_emb = model.text_embedding(text_inputs) + model.text_pos_embedding(text_inputs)
+    
+    # Add language embedding if available
+    if model.language_embedding is not None and language_ids is not None:
+        lang_emb = model.language_embedding(language_ids)  # (b, dim)
+        lang_emb_expanded = lang_emb.unsqueeze(1).expand(-1, text_emb.shape[1], -1)
+        text_emb = text_emb + lang_emb_expanded
+    
     mel_emb = model.mel_embedding(mel_inputs) + model.mel_pos_embedding(mel_inputs)
 
     text_logits, mel_logits = model.get_logits(conds, text_emb, model.text_head, mel_emb, model.mel_head)
@@ -623,6 +710,23 @@ def main() -> None:
     writer = SummaryWriter(log_dir=str(log_dir))
 
     tokenizer = load_tokenizer(args.tokenizer)
+    
+    # Load language map for multilingual training
+    language_map = load_language_map(args.language_map)
+    num_languages = max(args.num_languages, len(language_map)) if args.num_languages == 1 else args.num_languages
+    
+    # Verify model config matches num_languages
+    cfg = OmegaConf.load(args.config)
+    if hasattr(cfg.gpt, 'num_languages'):
+        if cfg.gpt.num_languages != num_languages:
+            print(f"[Warn] Config num_languages ({cfg.gpt.num_languages}) differs from argument ({num_languages}). Using config value.")
+            num_languages = cfg.gpt.num_languages
+    else:
+        cfg.gpt.num_languages = num_languages
+        # Save updated config
+        OmegaConf.save(cfg, args.config)
+        print(f"[Info] Updated config with num_languages={num_languages}")
+    
     model = build_model(args.config, tokenizer, args.base_checkpoint, device)
 
     train_specs = parse_manifest_specs(args.train_manifests, "--train-manifest")
@@ -653,16 +757,20 @@ def main() -> None:
     }
 
     def checkpoint_extra(extra_type: str) -> Dict[str, object]:
-        return {"type": extra_type, "manifests": manifest_metadata}
+        return {"type": extra_type, "manifests": manifest_metadata, "language_map": language_map}
 
     use_cuda = torch.cuda.is_available()
+
+    # Create collate function with language map
+    def collate_fn_with_lang(batch):
+        return collate_batch(batch, language_map=language_map)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        collate_fn=collate_batch,
+        collate_fn=collate_fn_with_lang,
         pin_memory=use_cuda,
     )
     val_loader = DataLoader(
@@ -670,7 +778,7 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=collate_batch,
+        collate_fn=collate_fn_with_lang,
         pin_memory=use_cuda,
     )
 

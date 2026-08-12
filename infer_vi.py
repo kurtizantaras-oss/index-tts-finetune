@@ -154,6 +154,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print detailed inference logs.",
     )
+    parser.add_argument(
+        "--language-id",
+        type=int,
+        default=None,
+        help="Language ID for multi-language models (default: None).",
+    )
     return parser.parse_args()
 
 
@@ -225,19 +231,23 @@ def main() -> None:
         output_path = Path(args.output).expanduser()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        engine.infer(
-            spk_audio_prompt=str(speaker_path),
-            text=text,
-            output_path=str(output_path),
-            emo_audio_prompt=args.emo_audio,
-            emo_alpha=args.emo_alpha,
-            use_emo_text=args.use_emo_text,
-            emo_text=args.emo_text,
-            interval_silence=args.interval_silence,
-            verbose=args.verbose,
-            max_text_tokens_per_segment=args.max_text_tokens,
+        infer_kwargs = {
+            "spk_audio_prompt": str(speaker_path),
+            "text": text,
+            "output_path": str(output_path),
+            "emo_audio_prompt": args.emo_audio,
+            "emo_alpha": args.emo_alpha,
+            "use_emo_text": args.use_emo_text,
+            "emo_text": args.emo_text,
+            "interval_silence": args.interval_silence,
+            "verbose": args.verbose,
+            "max_text_tokens_per_segment": args.max_text_tokens,
             **generation_kwargs,
-        )
+        }
+        if args.language_id is not None:
+            infer_kwargs["language_id"] = args.language_id
+
+        engine.infer(**infer_kwargs)
         print(f"Inference complete. Output saved to {output_path.resolve()}")
     finally:
         if tmp_cfg_path is not None:

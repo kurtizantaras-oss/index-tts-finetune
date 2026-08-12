@@ -414,14 +414,14 @@ class IndexTTS2:
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
               duration_seconds=None,
-              verbose=False, max_text_tokens_per_sentence=120, **generation_kwargs):
+              verbose=False, max_text_tokens_per_sentence=120, language_id=None, **generation_kwargs):
         print(">> start inference...")
         self._set_gr_progress(0, "start inference...")
         if verbose:
             print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt},"
                   f" emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
                   f"emo_vector:{emo_vector}, use_emo_text:{use_emo_text}, "
-                  f"emo_text:{emo_text}")
+                  f"emo_text:{emo_text}, language_id:{language_id}")
         start_time = time.perf_counter()
 
         if use_emo_text:
@@ -590,6 +590,12 @@ class IndexTTS2:
                     sentence_duration_tokens = None
                     if duration_plan:
                         sentence_duration_tokens = duration_plan[min(idx_sent, len(duration_plan) - 1)]
+                    
+                    # Prepare language_ids for inference if provided
+                    language_ids = None
+                    if language_id is not None and self.gpt.language_embedding is not None:
+                        language_ids = torch.tensor([language_id], dtype=torch.long, device=text_tokens.device)
+                    
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
                         text_tokens,
@@ -607,6 +613,7 @@ class IndexTTS2:
                         repetition_penalty=repetition_penalty,
                         max_generate_length=max_mel_tokens,
                         target_duration_tokens=sentence_duration_tokens,
+                        language_ids=language_ids,
                         **generation_kwargs
                     )
 

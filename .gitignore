@@ -1,46 +1,42 @@
-# Development Tools.
-.mypy_cache/
-.ruff_cache/
+```gitignore
+# Python cache
 __pycache__/
-.idea/
+*.pyc
+*.pyo
+*.pyd
+
+# Dependencies
+.venv/
+venv/
+env/
+pip-log.txt
+pip-selfcheck.json
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# Coverage reports
+.coverage
+coverage/
+htmlcov/
+
+# IDE specific
 .vscode/
+.idea/
+*.swp
+*.swo
 
-# Environments.
-.venv*/
-venv*/
-conda_env*/
-
-# Python Bytecode.
-*.py[cod]
-
-# Distribution/Packaging.
-/build/
-/dist/
-*.egg-info/
-.pypirc
-
-# Operating System Junk.
-*.DS_Store
+# OS generated
+.DS_Store
 Thumbs.db
-desktop.ini
 
-# IndexTTS.
-/cache/
-/checkpoints/*
-!/checkpoints/*.yaml
-/outputs/
-*processed_data/
-DeepSpeed/
-*datasets/
-hf_cache/
-*_dataset/
-*trained_ckpts*
-prompts/
-*.whl
-
-*.pth
-*.pt
-*.bin
-*.ckpt
-*.safetensors
-tools/checkpoints/
+# Build artifacts
+dist/
+build/
+*.egg-info/
+```

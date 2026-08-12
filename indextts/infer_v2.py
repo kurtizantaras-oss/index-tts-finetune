@@ -525,7 +525,8 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, more_segment_before=0,
+              language_id=None, **generation_kwargs):
         text = self._normalize_text(text).strip()
         sentences = self._split_text_into_sentences(text)
 
@@ -536,7 +537,8 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before,
+                    language_id=language_id, **generation_kwargs
                 )
             try:
                 return list(self.infer_generator(
@@ -544,7 +546,8 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before,
+                    language_id=language_id, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -556,7 +559,8 @@ class IndexTTS2:
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, quick_streaming_tokens=more_segment_before,
+                language_id=language_id, **generation_kwargs
             ))
             if result:
                 outputs.append(result[0])
@@ -577,14 +581,15 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=1200, stream_return=False, quick_streaming_tokens=0,
+              language_id=None, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
             print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt}, "
                   f"emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
                   f"emo_vector:{emo_vector}, use_emo_text:{use_emo_text}, "
-                  f"emo_text:{emo_text}")
+                  f"emo_text:{emo_text}, language_id:{language_id}")
         start_time = time.perf_counter()
 
         if use_emo_text or emo_vector is not None:
@@ -760,6 +765,11 @@ class IndexTTS2:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
                         # emovec = emovec_mat
 
+                    # Prepare language_ids tensor if language_id is provided
+                    lang_ids = None
+                    if language_id is not None:
+                        lang_ids = torch.tensor([language_id], dtype=torch.long, device=text_tokens.device)
+                    
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
                         text_tokens,
@@ -776,6 +786,7 @@ class IndexTTS2:
                         num_beams=num_beams,
                         repetition_penalty=repetition_penalty,
                         max_generate_length=max_mel_tokens,
+                        language_ids=lang_ids,
                         **generation_kwargs
                     )
 
